@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <unordered_set>
+#include <vector>
 #include "shader_recompiler/ir/breadth_first_search.h"
 #include "shader_recompiler/ir/ir_emitter.h"
 #include "shader_recompiler/ir/program.h"
@@ -71,13 +72,30 @@ static void EmitBarrierAtBlockStart(IR::Block* block) {
 }
 
 static bool IsDivergent(const IR::U1& cond) {
-    return IR::BreadthFirstSearch(cond, [](IR::Inst* inst) -> std::optional<bool> {
-               if (inst->GetOpcode() == IR::Opcode::GetAttributeU32 &&
-                   inst->Arg(0).Attribute() == IR::Attribute::LocalInvocationId) {
-                   return true;
-               }
-               return std::nullopt;
-           }) == true;
+    if (cond.IsImmediate()) {
+        return false;
+    }
+    std::unordered_set<const IR::Inst*> visited{cond.Inst()};
+    std::vector<const IR::Inst*> pending{cond.Inst()};
+    while (!pending.empty()) {
+        const IR::Inst* const inst = pending.back();
+        pending.pop_back();
+        if (inst->GetOpcode() == IR::Opcode::GetAttributeU32 &&
+            inst->Arg(0).Attribute() == IR::Attribute::LocalInvocationId) {
+            return true;
+        }
+        // Every invocation of the wave reads the same lane.
+        if (inst->GetOpcode() == IR::Opcode::ReadLane && inst->Arg(1).IsImmediate()) {
+            continue;
+        }
+        for (size_t arg = 0; arg < inst->NumArgs(); ++arg) {
+            const IR::Value value{inst->Arg(arg)};
+            if (!value.IsImmediate() && visited.emplace(value.Inst()).second) {
+                pending.push_back(value.Inst());
+            }
+        }
+    }
+    return false;
 }
 
 // Inserts a barrier after divergent conditional blocks to avoid undefined
