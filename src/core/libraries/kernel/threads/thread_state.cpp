@@ -41,6 +41,8 @@ void ThreadState::Collect(Pthread* curthread) {
                 ++it;
                 continue;
             }
+            Core::Memory::Instance()->UnregisterStack(
+                reinterpret_cast<VAddr>(td->attr.stackaddr_attr), td->attr.stacksize_attr);
             FreeStack(&td->attr);
             work_list.push_back(td);
             it = gc_list.erase(it);

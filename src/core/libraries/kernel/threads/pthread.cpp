@@ -326,6 +326,8 @@ int PS4_SYSV_ABI posix_pthread_create_name_np(PthreadT* thread, const PthreadAtt
         thread_state->Free(curthread, new_thread);
         return POSIX_EAGAIN;
     }
+    Core::Memory::Instance()->RegisterStack(
+        reinterpret_cast<VAddr>(new_thread->attr.stackaddr_attr), new_thread->attr.stacksize_attr);
 
     /*
      * Write a magic value to the thread structure
