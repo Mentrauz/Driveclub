@@ -3,6 +3,12 @@
 
 #include "fiber.h"
 
+#ifdef _WIN32
+#include <mutex>
+#include <unordered_map>
+#include <windows.h>
+#endif
+
 #include "common/elf_info.h"
 #include "common/logging/log.h"
 #include "core/libraries/fiber/fiber_error.h"
@@ -23,6 +29,47 @@ OrbisFiberContext* GetFiberContext() {
     return Core::GetTcbBase()->tcb_fiber;
 }
 
+#ifdef _WIN32
+// Windows delivers a fault on the stack of the faulting thread, so a fiber cannot run on guest
+// memory that the GPU caches may write protect. Each guest context gets a host stack of the same
+// size and the fiber runs on that instead.
+struct HostStack {
+    void* base;
+    u64 size;
+};
+static std::mutex host_stacks_mutex;
+static std::unordered_map<void*, HostStack> host_stacks;
+#endif
+
+/// Returns the start of the stack a fiber with this guest context runs on.
+static void* AcquireStack(void* addr_context, u64 size_context) {
+#ifdef _WIN32
+    std::scoped_lock lk{host_stacks_mutex};
+    HostStack& stack = host_stacks[addr_context];
+    if (stack.size != size_context) {
+        if (stack.base) {
+            VirtualFree(stack.base, 0, MEM_RELEASE);
+        }
+        stack.base = VirtualAlloc(nullptr, size_context, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        ASSERT_MSG(stack.base, "Failed to allocate a fiber stack of size = 0x{:x}", size_context);
+        stack.size = size_context;
+    }
+    return stack.base;
+#else
+    return addr_context;
+#endif
+}
+
+static void ReleaseStack(void* addr_context) {
+#ifdef _WIN32
+    std::scoped_lock lk{host_stacks_mutex};
+    if (const auto it = host_stacks.find(addr_context); it != host_stacks.end()) {
+        VirtualFree(it->second.base, 0, MEM_RELEASE);
+        host_stacks.erase(it);
+    }
+#endif
+}
+
 extern "C" s32 PS4_SYSV_ABI _sceFiberSetJmp(OrbisFiberContext* ctx) asm("_sceFiberSetJmp");
 extern "C" s32 PS4_SYSV_ABI _sceFiberLongJmp(OrbisFiberContext* ctx) asm("_sceFiberLongJmp");
 extern "C" void PS4_SYSV_ABI _sceFiberSwitchEntry(OrbisFiberData* data,
@@ -36,9 +83,10 @@ extern "C" void __attribute__((used)) PS4_SYSV_ABI _sceFiberForceQuit(u64 ret) {
 }
 
 void PS4_SYSV_ABI _sceFiberCheckStackOverflow(OrbisFiberContext* ctx) {
-    u64* stack_base = reinterpret_cast<u64*>(ctx->current_fiber->addr_context);
-    u64 stack_size = ctx->current_fiber->size_context;
-    if (stack_base && *stack_base != kFiberStackSignature) {
+    OrbisFiber* fiber = ctx->current_fiber;
+    u64 stack_size = fiber->size_context;
+    if (fiber->addr_context &&
+        *reinterpret_cast<u64*>(fiber->context_start) != kFiberStackSignature) {
         UNREACHABLE_MSG("Stack overflow detected in fiber with size = 0x{:x}", stack_size);
     }
 }
@@ -59,11 +107,11 @@ s32 PS4_SYSV_ABI _sceFiberAttachContext(OrbisFiber* fiber, void* addr_context, u
 
     fiber->addr_context = addr_context;
     fiber->size_context = size_context;
-    fiber->context_start = addr_context;
-    fiber->context_end = reinterpret_cast<u8*>(addr_context) + size_context;
+    fiber->context_start = AcquireStack(addr_context, size_context);
+    fiber->context_end = reinterpret_cast<u8*>(fiber->context_start) + size_context;
 
     /* Apply signature to start of stack */
-    *(u64*)addr_context = kFiberStackSignature;
+    *(u64*)fiber->context_start = kFiberStackSignature;
 
     if (fiber->flags & FiberFlags::ContextSizeCheck) {
         u64* stack_start = reinterpret_cast<u64*>(fiber->context_start);
@@ -99,7 +147,7 @@ void PS4_SYSV_ABI _sceFiberSwitchToFiber(OrbisFiber* fiber, u64 arg_on_run_to,
     data.entry = fiber->entry;
     data.arg_on_initialize = fiber->arg_on_initialize;
     data.arg_on_run_to = arg_on_run_to;
-    data.stack_addr = reinterpret_cast<u8*>(fiber->addr_context) + fiber->size_context;
+    data.stack_addr = fiber->context_end;
     if (fiber->flags & FiberFlags::SetFpuRegs) {
         data.fpucw = 0x037f;
         data.mxcsr = 0x9fc0;
@@ -205,11 +253,11 @@ s32 PS4_SYSV_ABI sceFiberInitializeImpl(OrbisFiber* fiber, const char* name, Orb
     fiber->magic_end = kFiberSignature1;
 
     if (addr_context != nullptr) {
-        fiber->context_start = addr_context;
-        fiber->context_end = reinterpret_cast<u8*>(addr_context) + size_context;
+        fiber->context_start = AcquireStack(addr_context, size_context);
+        fiber->context_end = reinterpret_cast<u8*>(fiber->context_start) + size_context;
 
         /* Apply signature to start of stack */
-        *(u64*)addr_context = kFiberStackSignature;
+        *(u64*)fiber->context_start = kFiberStackSignature;
 
         if (flags & FiberFlags::ContextSizeCheck) {
             u64* stack_start = reinterpret_cast<u64*>(fiber->context_start);
@@ -254,6 +302,9 @@ s32 PS4_SYSV_ABI sceFiberFinalize(OrbisFiber* fiber) {
         return ORBIS_FIBER_ERROR_STATE;
     }
 
+    if (fiber->addr_context) {
+        ReleaseStack(fiber->addr_context);
+    }
     return ORBIS_OK;
 }
 
