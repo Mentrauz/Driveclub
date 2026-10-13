@@ -101,15 +101,76 @@ static IR::Inst* FindBallotForMaskedBitCount(const IR::Inst& mbcnt) {
     return inst->GetOpcode() == IR::Opcode::Ballot ? inst : nullptr;
 }
 
+static bool IsReductionOp(IR::Opcode opcode) {
+    switch (opcode) {
+    case IR::Opcode::FPAdd32:
+    case IR::Opcode::FPMul32:
+    case IR::Opcode::FPMin32:
+    case IR::Opcode::FPMax32:
+    case IR::Opcode::IAdd32:
+    case IR::Opcode::IMul32:
+    case IR::Opcode::SMin32:
+    case IR::Opcode::UMin32:
+    case IR::Opcode::SMax32:
+    case IR::Opcode::UMax32:
+    case IR::Opcode::BitwiseAnd32:
+    case IR::Opcode::BitwiseOr32:
+    case IR::Opcode::BitwiseXor32:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static const IR::Inst* FindLaneRead(const IR::Value& value) {
+    const IR::Inst* inst = value.TryInst();
+    if (inst && inst->GetOpcode() == IR::Opcode::BitCastF32U32) {
+        inst = inst->Arg(0).TryInst();
+    }
+    if (!inst || inst->GetOpcode() != IR::Opcode::ReadLane || !inst->Arg(1).IsImmediate()) {
+        return nullptr;
+    }
+    return inst;
+}
+
+// Lanes without a thread hold the identity of a wave reduction on the guest but are undefined on
+// the host, so drop them from the final merge.
+static void FoldUnoccupiedLaneReads(IR::Program& program, u32 num_threads) {
+    u32 num_folded{};
+    for (IR::Block* const block : program.blocks) {
+        for (IR::Inst& inst : block->Instructions()) {
+            if (!IsReductionOp(inst.GetOpcode())) {
+                continue;
+            }
+            const IR::Inst* const lhs = FindLaneRead(inst.Arg(0));
+            const IR::Inst* const rhs = FindLaneRead(inst.Arg(1));
+            if (!lhs || !rhs || lhs->Arg(0) != rhs->Arg(0)) {
+                continue;
+            }
+            const bool lhs_occupied = lhs->Arg(1).U32() < num_threads;
+            if (lhs_occupied != (rhs->Arg(1).U32() < num_threads)) {
+                inst.ReplaceUsesWithAndRemove(inst.Arg(lhs_occupied ? 0 : 1));
+                ++num_folded;
+            }
+        }
+    }
+    if (num_folded != 0) {
+        LOG_INFO(Render_Recompiler, "Folded {} reads of unoccupied lanes", num_folded);
+    }
+}
+
 void LowerWave64BallotPass(IR::Program& program, const RuntimeInfo& runtime_info,
                            const Profile& profile) {
-    if (program.info.hw_stage != HwStage::Compute || profile.subgroup_size == 64) {
+    if (program.info.hw_stage != HwStage::Compute) {
         return;
     }
 
     const auto [size_x, size_y, size_z] = runtime_info.hw.cs.workgroup_size;
     const u32 num_threads = size_x * size_y * size_z;
-    if (num_threads <= 32) {
+    if (num_threads < 64) {
+        FoldUnoccupiedLaneReads(program, num_threads);
+    }
+    if (profile.subgroup_size == 64 || num_threads <= 32) {
         return;
     }
 
