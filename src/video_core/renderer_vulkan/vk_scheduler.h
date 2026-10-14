@@ -479,6 +479,9 @@ public:
     /// Attempts to execute operations whose tick the GPU has caught up with.
     void PopPendingOperations();
 
+    /// Executes every operation whose tick the GPU has caught up with, without throttling.
+    void DrainPendingOperations();
+
     /// Starts a new rendering scope with provided state.
     void BeginRendering(const RenderState& new_state);
 
