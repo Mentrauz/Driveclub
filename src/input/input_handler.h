@@ -66,6 +66,7 @@
 #define MOTION_TILT_LEFT 0x00800000
 #define MOTION_TILT_RIGHT 0x01000000
 #define MOTION_SHAKE 0x02000000
+#define MOUSE_GYRO_HOLD 0x04000000
 
 #define HOTKEY_FULLSCREEN 0xf0000001
 #define HOTKEY_PAUSE 0xf0000002
@@ -180,6 +181,7 @@ const std::map<std::string, u32> string_to_cbutton_map = {
     {"rpaddle_high", SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1},
     {"rpaddle_low", SDL_GAMEPAD_BUTTON_RIGHT_PADDLE2},
     {"mouse_gyro_roll_mode", MOUSE_GYRO_ROLL_MODE},
+    {"mouse_gyro_hold", MOUSE_GYRO_HOLD},
     {"qam", SDL_GAMEPAD_BUTTON_MISC1},
     {"r4", SDL_GAMEPAD_BUTTON_RIGHT_PADDLE1},
     {"l4", SDL_GAMEPAD_BUTTON_LEFT_PADDLE1},
@@ -571,13 +573,14 @@ public:
 
 class ControllerAllOutputs {
 public:
-    static constexpr u64 output_count = 54;
+    static constexpr u64 output_count = 55;
     std::array<ControllerOutput, output_count> data = {
         // Important: these have to be the first, or else they will update in the wrong order
         ControllerOutput(LEFTJOYSTICK_HALFMODE),
         ControllerOutput(RIGHTJOYSTICK_HALFMODE),
         ControllerOutput(KEY_TOGGLE),
         ControllerOutput(MOUSE_GYRO_ROLL_MODE),
+        ControllerOutput(MOUSE_GYRO_HOLD),
 
         // Button mappings
         ControllerOutput(SDL_GAMEPAD_BUTTON_NORTH),           // Triangle
